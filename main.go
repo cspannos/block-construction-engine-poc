@@ -9,12 +9,12 @@ import (
 
 // Transaction represents a simplified transaction
 type Transaction struct {
-	ID          string
-	GasPrice    int64
-	GasLimit    int64
-	MEVBonus    int64
-	PoLBonus    int64
-	Nonce       int
+	ID            string
+	GasPrice      int64
+	GasLimit      int64
+	MEVBonus      int64
+	PoLBonus      int64
+	Nonce         int
 	ConflictsWith []string // list of tx IDs this conflicts with
 }
 
@@ -106,7 +106,7 @@ func main() {
 		pool.AddTx(tx)
 	}
 
-	blockGasLimit := int64(1000000)
+	blockGasLimit := int64(30000000) // https://docs.berachain.com/learn/help/faqs#what-do-berachain-s-performance-metrics-look-like
 	selectedTxs := pool.SelectTopTransactions(blockGasLimit)
 
 	fmt.Printf("\nSelected Transactions for Block (Gas Limit: %d):\n", blockGasLimit)
@@ -118,4 +118,3 @@ func main() {
 	}
 	fmt.Printf("\nTotal Profit: %d\n", totalProfit)
 }
-
