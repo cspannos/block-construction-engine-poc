@@ -1,26 +1,47 @@
 package main
 
 import (
+	"bytes"
 	"container/heap"
+	"encoding/json"
 	"fmt"
-	"math/rand"
+	"io"
+	"net/http"
+	"strconv"
 	"time"
 )
 
-// Transaction represents a simplified transaction
+// Transaction represents a Berachain transaction
 type Transaction struct {
-	ID            string
-	GasPrice      int64
-	GasLimit      int64
-	MEVBonus      int64
-	PoLBonus      int64
-	Nonce         int
-	ConflictsWith []string // list of tx IDs this conflicts with
+	Hash          string   `json:"hash"`
+	GasPrice      int64    `json:"gasPrice"`
+	GasLimit      int64    `json:"gasLimit"`
+	MEVBonus      int64    `json:"mevBonus"`
+	PoLBonus      int64    `json:"polBonus"`
+	Nonce         int      `json:"nonce"`
+	ConflictsWith []string `json:"conflictsWith"`
 }
 
-// Profit calculates the total profit from the tx
-func (tx *Transaction) Profit() int64 {
-	return tx.GasPrice*tx.GasLimit + tx.MEVBonus + tx.PoLBonus
+// RPCRequest represents a JSON-RPC request
+type RPCRequest struct {
+	JSONRPC string        `json:"jsonrpc"`
+	Method  string        `json:"method"`
+	Params  []interface{} `json:"params"`
+	ID      int           `json:"id"`
+}
+
+// RPCResponse represents a JSON-RPC response
+type RPCResponse struct {
+	JSONRPC string        `json:"jsonrpc"`
+	ID      int           `json:"id"`
+	Result  []Transaction `json:"result"`
+	Error   *RPCError     `json:"error,omitempty"`
+}
+
+// RPCError represents a JSON-RPC error
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
 }
 
 // TxHeap implements a max-heap for Transactions based on Profit
@@ -56,8 +77,137 @@ func NewTxPool() *TxPool {
 }
 
 func (p *TxPool) AddTx(tx *Transaction) {
-	p.AllTxs[tx.ID] = tx
+	p.AllTxs[tx.Hash] = tx
 	heap.Push(&p.Heap, tx)
+}
+
+// Profit calculates the total profit from the tx
+func (tx *Transaction) Profit() int64 {
+	return tx.GasPrice*tx.GasLimit + tx.MEVBonus + tx.PoLBonus
+}
+
+// FetchTransactions fetches pending transactions from Berachain RPC
+func (p *TxPool) FetchTransactions() error {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// First get the latest block number
+	blockNumberReq := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "eth_blockNumber",
+		Params:  []interface{}{},
+		ID:      1,
+	}
+
+	jsonData, err := json.Marshal(blockNumberReq)
+	if err != nil {
+		return fmt.Errorf("error marshaling request: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", "https://rpc.berachain.com", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response: %v", err)
+	}
+
+	var blockNumResp struct {
+		JSONRPC string    `json:"jsonrpc"`
+		ID      int       `json:"id"`
+		Result  string    `json:"result"`
+		Error   *RPCError `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(body, &blockNumResp); err != nil {
+		return fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	if blockNumResp.Error != nil {
+		return fmt.Errorf("RPC error: %s", blockNumResp.Error.Message)
+	}
+
+	// Now get the block with transactions
+	blockReq := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "eth_getBlockByNumber",
+		Params:  []interface{}{blockNumResp.Result, true}, // true to include full transaction objects
+		ID:      2,
+	}
+
+	jsonData, err = json.Marshal(blockReq)
+	if err != nil {
+		return fmt.Errorf("error marshaling request: %v", err)
+	}
+
+	req, err = http.NewRequest("POST", "https://rpc.berachain.com", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response: %v", err)
+	}
+
+	var blockResp struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Result  struct {
+			Transactions []struct {
+				Hash     string `json:"hash"`
+				GasPrice string `json:"gasPrice"`
+				Gas      string `json:"gas"`
+				Nonce    string `json:"nonce"`
+			} `json:"transactions"`
+		} `json:"result"`
+		Error *RPCError `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(body, &blockResp); err != nil {
+		return fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	if blockResp.Error != nil {
+		return fmt.Errorf("RPC error: %s", blockResp.Error.Message)
+	}
+
+	// Convert hex values to integers and create transactions
+	for _, tx := range blockResp.Result.Transactions {
+		gasPrice, _ := strconv.ParseInt(tx.GasPrice[2:], 16, 64)
+		gasLimit, _ := strconv.ParseInt(tx.Gas[2:], 16, 64)
+		nonce, _ := strconv.ParseInt(tx.Nonce[2:], 16, 64)
+
+		transaction := &Transaction{
+			Hash:          tx.Hash,
+			GasPrice:      gasPrice,
+			GasLimit:      gasLimit,
+			Nonce:         int(nonce),
+			MEVBonus:      0, // This would need to be calculated or fetched from another source
+			PoLBonus:      0, // Same as above
+			ConflictsWith: []string{},
+		}
+		p.AddTx(transaction)
+	}
+
+	return nil
 }
 
 func (p *TxPool) SelectTopTransactions(gasLimit int64) []*Transaction {
@@ -82,7 +232,7 @@ func (p *TxPool) SelectTopTransactions(gasLimit int64) []*Transaction {
 			continue
 		}
 		usedGas += tx.GasLimit
-		usedIDs[tx.ID] = true
+		usedIDs[tx.Hash] = true
 		selected = append(selected, tx)
 	}
 
@@ -90,20 +240,12 @@ func (p *TxPool) SelectTopTransactions(gasLimit int64) []*Transaction {
 }
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
 	pool := NewTxPool()
 
-	// Mock some transactions
-	for i := 0; i < 20; i++ {
-		tx := &Transaction{
-			ID:       fmt.Sprintf("tx%d", i),
-			GasPrice: rand.Int63n(100),
-			GasLimit: 21000 + rand.Int63n(80000),
-			MEVBonus: rand.Int63n(10000),
-			PoLBonus: rand.Int63n(5000),
-			Nonce:    i,
-		}
-		pool.AddTx(tx)
+	// Fetch transactions from Berachain RPC
+	if err := pool.FetchTransactions(); err != nil {
+		fmt.Printf("Error fetching transactions: %v\n", err)
+		return
 	}
 
 	blockGasLimit := int64(30000000) // https://docs.berachain.com/learn/help/faqs#what-do-berachain-s-performance-metrics-look-like
@@ -114,7 +256,7 @@ func main() {
 	for _, tx := range selectedTxs {
 		txProfit := tx.Profit()
 		totalProfit += txProfit
-		fmt.Printf(" - %s | Profit: %d | Gas: %d\n", tx.ID, txProfit, tx.GasLimit)
+		fmt.Printf(" - %s | Profit: %d | Gas: %d\n", tx.Hash, txProfit, tx.GasLimit)
 	}
 	fmt.Printf("\nTotal Profit: %d\n", totalProfit)
 }
