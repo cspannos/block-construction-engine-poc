@@ -92,15 +92,15 @@ func (p *TxPool) FetchTransactions() error {
 		Timeout: 10 * time.Second,
 	}
 
-	// First get the latest block number
-	blockNumberReq := RPCRequest{
+	// Get pending transactions from the mempool
+	blockReq := RPCRequest{
 		JSONRPC: "2.0",
-		Method:  "eth_blockNumber",
-		Params:  []interface{}{},
+		Method:  "eth_getBlockByNumber",
+		Params:  []interface{}{"pending", true}, // "pending" to get mempool transactions
 		ID:      1,
 	}
 
-	jsonData, err := json.Marshal(blockNumberReq)
+	jsonData, err := json.Marshal(blockReq)
 	if err != nil {
 		return fmt.Errorf("error marshaling request: %v", err)
 	}
@@ -118,51 +118,6 @@ func (p *TxPool) FetchTransactions() error {
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response: %v", err)
-	}
-
-	var blockNumResp struct {
-		JSONRPC string    `json:"jsonrpc"`
-		ID      int       `json:"id"`
-		Result  string    `json:"result"`
-		Error   *RPCError `json:"error,omitempty"`
-	}
-
-	if err := json.Unmarshal(body, &blockNumResp); err != nil {
-		return fmt.Errorf("error unmarshaling response: %v", err)
-	}
-
-	if blockNumResp.Error != nil {
-		return fmt.Errorf("RPC error: %s", blockNumResp.Error.Message)
-	}
-
-	// Now get the block with transactions
-	blockReq := RPCRequest{
-		JSONRPC: "2.0",
-		Method:  "eth_getBlockByNumber",
-		Params:  []interface{}{blockNumResp.Result, true}, // true to include full transaction objects
-		ID:      2,
-	}
-
-	jsonData, err = json.Marshal(blockReq)
-	if err != nil {
-		return fmt.Errorf("error marshaling request: %v", err)
-	}
-
-	req, err = http.NewRequest("POST", "https://rpc.berachain.com", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err = client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error making request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("error reading response: %v", err)
 	}
@@ -239,6 +194,13 @@ func (p *TxPool) SelectTopTransactions(gasLimit int64) []*Transaction {
 	return selected
 }
 
+// FormatWei converts wei to a human-readable string
+func FormatWei(wei int64) string {
+	// Convert to float for division
+	bera := float64(wei) / 1e18
+	return fmt.Sprintf("%.6f BERA", bera)
+}
+
 func main() {
 	pool := NewTxPool()
 
@@ -256,7 +218,7 @@ func main() {
 	for _, tx := range selectedTxs {
 		txProfit := tx.Profit()
 		totalProfit += txProfit
-		fmt.Printf(" - %s | Profit: %d | Gas: %d\n", tx.Hash, txProfit, tx.GasLimit)
+		fmt.Printf(" - %s | Profit: %s | Gas: %d\n", tx.Hash, FormatWei(txProfit), tx.GasLimit)
 	}
-	fmt.Printf("\nTotal Profit: %d\n", totalProfit)
+	fmt.Printf("\nTotal Profit: %s\n", FormatWei(totalProfit))
 }
